@@ -1,0 +1,221 @@
+---
+title: "Judging the judges"
+output: html_figureskating
+---
+
+Judging the Judges
+
+対象データは、2017年のフィギュアスケートGPシリーズ（６戦とファイナル）の男女個人の要素評価。
+```{r}
+library(tidyverse)
+library(ggplot2)
+results <- read_csv("judges2017.csv")
+head(results, 3)
+```
+
+judgeがその審判の評価(3から-3まで)、difは同じ演技を採点した同僚審判８人の平均評価との差を表す。
+isMax/isMinは９人中最高/最低評価だったこと、isSingleMax/Minはそれが単独だったことを表す。（従って、isSingleMaxが1なら必ずisMaxも1になる）
+
+審判の個人名と出身国のリストは以下のようになる。
+
+```{r}
+judgeNames <- results %>%
+  distinct(judgeName, .keep_all=T) %>%
+  transmute(judgeName, judgeCountry)
+head(judgeNames, 5) 
+```
+
+同様に、
+
+```{r}
+judgeCountries <- results %>%
+  distinct(judgeCountry, .keep_all=T) %>%
+  transmute(judgeCountry)
+playerCountries <- results %>%
+  distinct(country, .keep_all=T) %>%
+  transmute(country)
+head(playerCountries, 5)
+```
+
+そもそもGOEは正規分布するのか？
+average9は別に用意した９人の平均値。競技が放棄された場合、データに999が入るのでfilterでそれを除く
+
+```{r}
+avg <- read_csv("average9.csv") %>% filter(average9 < 4)
+histA <- hist(avg$average9, breaks= seq(-3.0555,3.0555,by=0.1111) )
+```
+
+失敗ジャンプは全員が-3を出すので、-3が突出している。
+-2以下も除き、正規分布かどうかをshapiro検定してみる。
+
+```{r}
+avg <- read_csv("average9.csv") %>% filter(average9 < 4, average9 > -2)
+shapiro.test(avg$average9)
+```
+
+p値が著しく小さいので、正規分布ではない。
+しかし、平均値との差であるdifはそうでないかもしれない。breakSeqはヒストグラムの区分。
+
+```{r}
+breakSeq <- seq(-4.5625,4.5625,by=0.125)
+histB <- hist(results$dif, breaks=breakSeq, xlim=c(-3,3), ylim=c(0,3000), main="histogram of dif", xlab="", ylab="" )
+```
+
+一見すると正規分布だが、その保証がない。
+shapiro検定にはサンプル数が多すぎるので、1000だけランダム抽出して検定する。
+
+```{r}
+shapiro.test( sample(results$dif, 1000) )
+```
+つまり、正規分布ではない！
+
+たとえば、Ms. Peggy GRAHAMの審判は
+```{r}
+results %>%
+  filter(judgeName=="Ms. Peggy GRAHAM") %>%
+  ggplot(aes(x = dif)) + geom_histogram(breaks = breakSeq)
+```
+
+同胞を審判した場合だけを抜き出せば
+
+```{r}
+results %>%
+  filter(judgeName=="Ms. Peggy GRAHAM", isCompatriot==1) %>%
+  ggplot(aes(x = dif)) + geom_histogram(breaks = breakSeq)
+```
+
+そのうち、最高評価だけ（集計から排除される）を抜き出せば
+
+```{r}
+results %>%
+  filter(judgeName=="Ms. Peggy GRAHAM", isCompatriot==1, isSingleMax == 1 )  %>%
+  ggplot(aes(x = dif)) + geom_histogram(breaks = breakSeq)
+```
+つまり、一回しかない。
+
+単独最高評価はどのような分布だろうか。赤い部分が単独最高評価として採点から排除された部分。
+バイアス(dif)が１を超えた場合、ほとんど排除されている。
+
+```{r}
+hist(results$dif, breaks=breakSeq, xlim=c(-3,3), ylim=c(0,3000), main="dif/singleMax", xlab="", ylab="" )
+onlySingleMax <- results %>% filter( isSingleMax == 1 )
+hist(onlySingleMax$dif, breaks=breakSeq, xlim=c(-3,3), ylim=c(0,3000), main="histogram of dif", xlab="", ylab="", col="red", add=TRUE )
+```
+
+それが同胞選手である部分は著しく少ない。
+
+```{r}
+hist(results$dif, breaks=breakSeq, xlim=c(-3,3), ylim=c(0,3000), main="dif/SingleMax/Compatriot", xlab="", ylab="" )
+onlySingleMax <- results %>% filter( isSingleMax == 1, isCompatriot == 1 )
+hist(onlySingleMax$dif, breaks=breakSeq, xlim=c(-3,3), ylim=c(0,3000), main="histogram of dif", xlab="", ylab="", col="red", add=TRUE )
+```
+
+単独最低評価かつ同胞選手はほとんどない。
+
+```{r}
+hist(results$dif, breaks=breakSeq, xlim=c(-3,3), ylim=c(0,3000), main="dif/SingleMin/Compatriot", xlab="", ylab="" )
+onlySingleMax <- results %>% filter( isSingleMin == 1, isCompatriot == 1 )
+hist(onlySingleMax$dif, breaks=breakSeq, xlim=c(-3,3), ylim=c(0,3000), main="histogram of dif", xlab="", ylab="", col="red", add=TRUE )
+```
+
+# グラフィックス用
+すべての審判と国の組み合わせをループで回し、json形式で書き出す。
+
+```{r}
+library(exactRankTests) # 順位和検定のパッケージ
+library(rjson)
+## Matrix用のデータ書き出し
+write("[", file="judgeMatrix.json" )
+for (i in 1:nrow(judgeNames) ) {
+  this_judge <- judgeNames[i,]
+  this_judge_name <- this_judge$judgeName
+  for (this_country in playerCountries$country){
+    # すべての判定
+    this_judgements <- filter(results, judgeName==this_judge_name )
+    ## 違う国の選手を判定したもの
+    this_non_compat <- filter(results, judgeName==this_judge_name, country!=this_country)
+    ## 同じ国の選手を判定したもの
+    this_compat <- filter(results, judgeName==this_judge_name, country==this_country )
+    if(nrow(this_compat) > 0) { # 同国選手を審判した例がある場合だけ検定する
+      this_pair <- list(name=this_judge_name, judge_country=this_judge$judgeCountry, country=this_country)
+      # ウェルチのt検定を行う
+      t <- t.test(this_non_compat$dif, this_compat$dif, var.equal=F)
+      this_pair$mean_non_compat <- as.numeric(t$estimate[1])
+      this_pair$mean_compat <- as.numeric(t$estimate[2])
+      this_pair$t_p <- as.numeric(t$p.value[1])
+      # 順位和検定（正規性を想定しない）
+      w.result <- wilcox.exact(x=this_non_compat$dif, y=this_compat$dif, paired = FALSE)
+      this_pair$w_p <- as.numeric(w.result$p.value)
+      s <- sprintf("%s,", toJSON(this_pair) ) # リストをjson形式に変換して書き出す
+      write(s, file="judgeMatrix.json", append=T )
+    }
+  }
+}
+write("]", file="judgeMatrix.json", append=T )
+# 最後の「,」を手作業で削除すること
+```
+
+すべての審判の判定情報をjsonで書き出す。
+
+```{r}
+write("[", file="judges.json" )
+pdf(file="judges2017.pdf", width=10, height=20)
+par(mfrow=c(6,4))
+
+for (i in 1:nrow(judgeNames) ) {
+  this_judge <- judgeNames[i,]
+  this_judge_country <- this_judge$judgeCountry
+  this_judge_name <- this_judge$judgeName
+  # print(this_judge_name)
+  # print(this_judge_country)
+  # readline("next?")
+  this_judge_list <- list(name=this_judge_name, country=this_judge_country)
+
+  this_judgements <- filter(results, judgeName==this_judge_name)
+  this_compat_judgements <- filter(results, judgeName==this_judge_name, isCompatriot==1)
+  this_non_compat_judgements <- filter(results, judgeName==this_judge_name, isCompatriot==0)
+
+  hAll <- hist(this_judgements$dif, breaks=breakSeq, xlim=c(-2,2), ylim=c(0,80), main=this_judge_name, xlab="", ylab="Freq")
+  this_judge_list$counts <- hAll$counts
+  this_judge_list$num <- length(this_judgements$dif)
+  this_judge_list$nSingleMax <- sum(this_judgements$isSingleMax)
+  this_judge_list$nSingleMin <- sum(this_judgements$isSingleMin)
+  this_judge_list$nCompat <- sum(this_judgements$isCompatriot)
+
+  # 正規性の検定
+  result <- shapiro.test(this_judgements$dif)
+  this_judge_list$shapiro.p <- result$p.value
+  
+  this_judge_list$mean_non_compat <- mean(this_non_compat_judgements$dif)
+  this_judge_list$sd_non_compat_fit <- sd(this_non_compat_judgements$dif)
+  # 正規分布にフィットさせた場合
+  fit <- fitdistr(this_non_compat_judgements$dif, "normal")
+  this_judge_list$mean_non_compat_fit <- as.numeric(fit$estimate[1])
+  this_judge_list$sd_non_compat_fit <- as.numeric(fit$estimate[2])
+
+  if( this_judge_list$nCompat > 0 ){
+    assert_that( nrow(this_compat_judgements) > 0  )
+    h <- hist(this_compat_judgements$dif, breaks=breakSeq, xlim=c(-2,2), ylim=c(0,80), add=T, col="red", main="", xlab="", ylab="")
+    this_judge_list$compats_counts <- h$counts
+
+    this_judge_list$mean_compat <- mean(this_compat_judgements$dif)
+    this_judge_list$sd_compat <- sd(this_compat_judgements$dif)
+    fit <- fitdistr(this_compat_judgements$dif,"normal")
+    this_judge_list$mean_compat_fit <- as.numeric(fit$estimate[1])
+    this_judge_list$sd_compat_fit <- as.numeric(fit$estimate[2])
+    
+    # t検定（正規性を想定している）
+    t.result <- t.test(this_non_compat_judgements$dif, this_compat_judgements$dif, var.equal=F)
+    this_judge_list$t_p <- t.result$p.value
+    # 順位和検定（正規性を想定しない）
+    w.result <- wilcox.exact(x=this_non_compat_judgements$dif, y=this_compat_judgements$dif, paired = FALSE)
+    this_judge_list$w_p <- w.result$p.value
+  }
+  s <- sprintf("%s,", toJSON(this_judge_list) )
+  write(s, file="judges.json", append=T )
+}
+write("]", file="judges.json", append=T )
+dev.off()
+```
+
+
